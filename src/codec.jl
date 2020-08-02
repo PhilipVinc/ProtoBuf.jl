@@ -531,6 +531,11 @@ end
 ##
 # helpers
 oiddict() = @static isdefined(Base, :IdDict) ? IdDict() : ObjectIdDict()
+
+const _metacache_lock = ReentrantLock()
+const _mapentry_lock  = ReentrantLock()
+const _fillcache_lock = ReentrantLock()
+
 const _metacache = oiddict() # dict of Type => ProtoMeta
 const _mapentry_metacache = oiddict()
 const _fillcache = Dict{UInt,BitArray{2}}()
@@ -559,7 +564,11 @@ function meta(typ::Type, required::Vector{Symbol}, numbers::Vector{Int}, default
     haskey(_metacache, typ) && return _metacache[typ]
 
     m = ProtoMeta(typ, ProtoMetaAttribs[])
-    cache && (_metacache[typ] = m)
+    if cache
+        lock(_metacache_lock)
+        _metacache[typ] = m
+        unlock(_metacache_lock)
+    end
 
     attribs = ProtoMetaAttribs[]
     names = fld_names(typ)
@@ -586,7 +595,9 @@ end
 
 function mapentry_meta(typ::Type{Dict{K,V}}) where {K,V}
     m = ProtoMeta(typ, ProtoMetaAttribs[])
+    lock(_mapentry_lock)
     _mapentry_metacache[typ] = m
+    unlock(_mapentry_lock)
 
     attribs = ProtoMetaAttribs[]
     push!(attribs, ProtoMetaAttribs(1, :key, wiretype(K), 0, false, defaultval(K), nothing))
@@ -656,9 +667,16 @@ function filled(obj)
         end
     end
     if !isimmutable(obj)
+        lock(_fillcache_lock)
         _fillcache[oid] = fill
-        finalizer(obj->delete!(_fillcache, objectid(obj)), obj)
+        unlock(_fillcache_lock)
+        finalizer(obj->begin
+            lock(_fillcache_lock)
+            delete!(_fillcache, objectid(obj))
+            unlock(_fillcache_lock)
+        end, obj)
     end
+
     fill
 end
 
